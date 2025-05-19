@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Voice Sentiment Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for better aesthetics if needed for other elements */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        #chartContainer {
+            position: relative;
+            height: 50vh; /* Adjusted height */
+            max-height: 350px;
+            width: 100%;
+        }
+        @media (min-width: 768px) { /* md breakpoint */
+            #chartContainer {
+                height: 300px;
+            }
+        }
+        .mic-button {
+            transition: background-color 0.3s ease, transform 0.1s ease;
+        }
+        .mic-button:active {
+            transform: scale(0.95);
+        }
+        .listening {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } /* Tailwind red-500 */
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-2xl">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-gray-800">Voice Sentiment Analyzer</h1>
+            <p class="text-gray-600 mt-1">Speak, and see the sentiment of your words analyzed live.</p>
+        </header>
+
+        <div class="mb-6 flex flex-col sm:flex-row justify-center items-center space-y-3 sm:space-y-0 sm:space-x-4">
+            <button id="startListenButton" class="mic-button w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transform hover:scale-105">
+                Start Listening
+            </button>
+            <button id="stopListenButton" class="mic-button w-full sm:w-auto bg-red-500 hover:bg-red-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transform hover:scale-105" disabled>
+                Stop Listening
+            </button>
+        </div>
+        
+        <div class="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200 min-h-[60px]" id="transcribedTextContainer">
+            <h3 class="text-sm font-semibold text-gray-700 mb-1">You said:</h3>
+            <p id="transcribedTextOutput" class="text-sm text-gray-800 italic break-words">...</p>
+        </div>
+
+        <div id="statusMessage" class="mb-4 text-sm text-center text-gray-600 min-h-[20px]"></div>
+        <div id="errorMessage" class="mb-4 text-sm text-center text-red-600 min-h-[20px]"></div>
+        
+        <div id="chartContainer" class="mb-6">
+            <canvas id="sentimentChart"></canvas>
+        </div>
+        
+        <div class="mt-4" id="rawJsonResponseContainer" style="display: none;">
+            <h3 class="text-sm font-semibold text-gray-700 mb-1">Raw API Response (JSON):</h3>
+            <pre id="rawJsonResponse" class="text-xs bg-gray-800 text-green-400 p-3 rounded-lg overflow-x-auto max-h-40 custom-scrollbar"></pre>
+        </div>
+
+    </div>
+
+    <footer class="text-center text-sm text-gray-500 mt-8 pb-4">
+        Powered by Web Speech API, Gemini & Chart.js
+    </footer>
+
+    <script>
+        const startListenButton = document.getElementById('startListenButton');
+        const stopListenButton = document.getElementById('stopListenButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const errorMessage = document.getElementById('errorMessage');
+        const sentimentChartCanvas = document.getElementById('sentimentChart');
+        
+        const transcribedTextContainer = document.getElementById('transcribedTextContainer');
+        const transcribedTextOutput = document.getElementById('transcribedTextOutput');
+        
+        const rawJsonResponseContainer = document.getElementById('rawJsonResponseContainer');
+        const rawJsonResponse = document.getElementById('rawJsonResponse');
+
+        let sentimentChartInstance = null;
+        const sentimentLabels = ['Angry', 'Calm', 'Neutral', 'Happy', 'Annoyed'];
+        const sentimentColors = [
+            'rgba(255, 99, 132, 0.7)',  // Angry (Red)
+            'rgba(54, 162, 235, 0.7)', // Calm (Blue)
+            'rgba(201, 203, 207, 0.7)',// Neutral (Grey)
+            'rgba(75, 192, 192, 0.7)', // Happy (Green)
+            'rgba(255, 159, 64, 0.7)'  // Annoyed (Orange)
+        ];
+        const sentimentBorderColors = [
+            'rgba(255, 99, 132, 1)',
+            'rgba(54, 162, 235, 1)',
+            'rgba(201, 203, 207, 1)',
+            'rgba(75, 192, 192, 1)',
+            'rgba(255, 159, 64, 1)'
+        ];
+
+        // --- Web Speech API Setup ---
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = true; // Keep listening even after a pause
+            recognition.interimResults = true; // Get results as they are recognized
+            recognition.lang = 'en-US'; // Set language
+
+            recognition.onstart = () => {
+                statusMessage.textContent = 'Listening... Speak now.';
+                startListenButton.disabled = true;
+                stopListenButton.disabled = false;
+                startListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+                stopListenButton.classList.remove('opacity-50', 'cursor-not-allowed');
+                startListenButton.classList.add('listening'); // Add pulse animation
+                errorMessage.textContent = '';
+            };
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                let finalTranscript = '';
+
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                
+                transcribedTextOutput.textContent = finalTranscript + interimTranscript;
+
+                // Analyze final transcript segments
+                if (finalTranscript.trim()) {
+                    statusMessage.textContent = `Recognized: "${finalTranscript.trim()}" Analyzing...`;
+                    getSentimentAnalysis(finalTranscript.trim());
+                }
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                let errorMsg = `Speech recognition error: ${event.error}.`;
+                if (event.error === 'no-speech') {
+                    errorMsg = "No speech detected. Please try speaking louder or closer to the microphone.";
+                } else if (event.error === 'audio-capture') {
+                    errorMsg = "Audio capture error. Ensure your microphone is working and permissions are granted.";
+                } else if (event.error === 'not-allowed') {
+                    errorMsg = "Microphone access denied. Please allow microphone access in your browser settings.";
+                }
+                errorMessage.textContent = errorMsg;
+                statusMessage.textContent = 'Listening stopped due to error.';
+                stopListening(); // Ensure UI is reset
+            };
+
+            recognition.onend = () => {
+                // This event fires when recognition.stop() is called, or automatically if continuous is false.
+                // If continuous is true, it might also fire on some errors or network issues.
+                // We only want to update UI if it wasn't an intentional stop via button.
+                if (startListenButton.disabled) { // If still in "listening" state from UI perspective
+                    statusMessage.textContent = 'Listening stopped. Click "Start Listening" to try again.';
+                    stopListening(); // Reset UI state
+                }
+            };
+
+        } else {
+            statusMessage.textContent = 'Speech recognition not supported by your browser. Please try Chrome or Edge.';
+            startListenButton.disabled = true;
+            stopListenButton.disabled = true;
+            startListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+            stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+        
+        function startListening() {
+            if (recognition) {
+                transcribedTextOutput.textContent = "..."; // Clear previous transcript
+                errorMessage.textContent = "";
+                statusMessage.textContent = "Starting listener...";
+                try {
+                    recognition.start();
+                } catch (e) {
+                    // This can happen if recognition is already started
+                    console.warn("Recognition already started or error starting:", e);
+                     if (e.name === 'InvalidStateError') {
+                        statusMessage.textContent = 'Listener was already active. Speak now.';
+                        startListenButton.disabled = true;
+                        stopListenButton.disabled = false;
+                        startListenButton.classList.add('listening');
+                    } else {
+                        errorMessage.textContent = "Could not start listener. Check console.";
+                    }
+                }
+            }
+        }
+
+        function stopListening() {
+            if (recognition) {
+                recognition.stop();
+            }
+            startListenButton.disabled = false;
+            stopListenButton.disabled = true;
+            startListenButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+            startListenButton.classList.remove('listening'); // Remove pulse
+            if (statusMessage.textContent.startsWith("Listening...")) {
+                 statusMessage.textContent = 'Listening stopped.';
+            }
+        }
+
+        startListenButton.addEventListener('click', startListening);
+        stopListenButton.addEventListener('click', stopListening);
+
+
+        // Initialize Chart
+        function initializeChart() {
+            if (sentimentChartInstance) {
+                sentimentChartInstance.destroy();
+            }
+            const ctx = sentimentChartCanvas.getContext('2d');
+            sentimentChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: sentimentLabels,
+                    datasets: [{
+                        label: 'Sentiment Score',
+                        data: [0, 0, 0, 0, 0], // Initial data
+                        backgroundColor: sentimentColors,
+                        borderColor: sentimentBorderColors,
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 1.0,
+                            title: {
+                                display: true,
+                                text: 'Sentiment Score (0.0 - 1.0)',
+                                font: { size: 14 }
+                            },
+                            ticks: {
+                                stepSize: 0.1
+                            }
+                        },
+                        x: {
+                             ticks: {
+                                font: { size: 12 }
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false 
+                        },
+                        title: {
+                            display: true,
+                            text: 'Sentiment Analysis of Spoken Words',
+                            font: { size: 16, weight: 'bold' },
+                            padding: { top: 10, bottom: 20 }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y.toFixed(2);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update chart with new data
+        function updateChart(scores) {
+            if (sentimentChartInstance) {
+                sentimentChartInstance.data.datasets[0].data = [
+                    scores.angry || 0,
+                    scores.calm || 0,
+                    scores.neutral || 0,
+                    scores.happy || 0,
+                    scores.annoyed || 0
+                ];
+                sentimentChartInstance.update();
+            }
+        }
+
+        // Call Gemini API for sentiment analysis
+        async function getSentimentAnalysis(text) {
+            // statusMessage.textContent is handled by onresult and onerror for speech part
+            errorMessage.textContent = '';
+            // Button disabling is handled by speech recognition start/stop
+
+            const apiKey = "AIzaSyDnKjvS0iaR922JewmNDIGe4LMcayixTiE"; // API key will be injected by the environment if needed.
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const prompt = `You are an expert sentiment analysis model. Analyze the sentiment of the following text. Provide a score from 0.0 (not present) to 1.0 (strongly present) for each of these five sentiment categories: Angry, Calm, Neutral, Happy, Annoyed.
+The scores should reflect the intensity of each specific sentiment detected in the text.
+Text: "${text}"
+Return the analysis ONLY as a JSON object matching the specified schema. Do not include any other explanatory text before or after the JSON object.`;
+            
+            const schema = {
+                type: "OBJECT",
+                properties: {
+                    "angry": { "type": "NUMBER", "description": "Score for angry sentiment (0.0-1.0)" },
+                    "calm": { "type": "NUMBER", "description": "Score for calm sentiment (0.0-1.0)" },
+                    "neutral": { "type": "NUMBER", "description": "Score for neutral sentiment (0.0-1.0)" },
+                    "happy": { "type": "NUMBER", "description": "Score for happy sentiment (0.0-1.0)" },
+                    "annoyed": { "type": "NUMBER", "description": "Score for annoyed sentiment (0.0-1.0)" }
+                },
+                required: ["angry", "calm", "neutral", "happy", "annoyed"]
+            };
+
+            const payload = {
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: schema,
+                    temperature: 0.2 
+                }
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorBody = await response.text();
+                    console.error('API Error Response:', errorBody);
+                    throw new Error(`API request failed with status ${response.status}. ${errorBody}`);
+                }
+
+                const result = await response.json();
+
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    
+                    const rawJsonText = result.candidates[0].content.parts[0].text;
+                    rawJsonResponse.textContent = JSON.stringify(JSON.parse(rawJsonText), null, 2); 
+                    rawJsonResponseContainer.style.display = 'block';
+
+                    const sentimentScores = JSON.parse(rawJsonText);
+                    
+                    for (const key in sentimentScores) {
+                        if (typeof sentimentScores[key] !== 'number') sentimentScores[key] = 0;
+                        sentimentScores[key] = Math.max(0, Math.min(1, sentimentScores[key]));
+                    }
+                    
+                    updateChart(sentimentScores);
+                    statusMessage.textContent = 'Analysis complete for: "' + text + '". Listening...'; // Update status and indicate it's still listening
+                    if (!recognition || !startListenButton.disabled) { // If recognition somehow stopped
+                        statusMessage.textContent = 'Analysis complete for: "' + text + '". Click Start Listening to continue.';
+                    }
+
+
+                } else {
+                    console.error('Unexpected API response structure:', result);
+                    throw new Error('Failed to parse sentiment scores from API response. Unexpected structure.');
+                }
+
+            } catch (error) {
+                console.error('Error during sentiment analysis:', error);
+                errorMessage.textContent = `Sentiment API Error: ${error.message}.`;
+                // Don't reset chart here, let it show last successful analysis
+                // statusMessage.textContent = 'Sentiment analysis failed.'; // This might overwrite speech status
+                 if (recognition && startListenButton.disabled) { // If listening
+                    statusMessage.textContent = 'Sentiment analysis failed. Still listening...';
+                } else {
+                    statusMessage.textContent = 'Sentiment analysis failed. Click Start Listening to try again.';
+                }
+                rawJsonResponseContainer.style.display = 'none';
+            } finally {
+                // Button state is managed by speech recognition events
+            }
+        }
+
+        // Initialize chart on page load
+        window.onload = () => {
+            initializeChart();
+            // Initial state for buttons
+            stopListenButton.disabled = true;
+            stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+            if (!SpeechRecognition) {
+                 startListenButton.classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        };
+    </script>
+
+</body>
+</html>
