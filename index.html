@@ -104,7 +104,7 @@
 </head>
 <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
 
-    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl"> {/* Increased max-width for side-by-side */}
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl"> 
         <header class="mb-6 text-center">
             <h1 class="text-3xl font-bold text-gray-800">Voice Sentiment Analyzer & Chat</h1>
             <p class="text-gray-600 mt-1">Speak for sentiment analysis and an interactive voice chat with Gemini.</p>
@@ -174,10 +174,12 @@
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         let recognition;
-        const speechSynthesis = window.speechSynthesis;
+        // speechSynthesis is no longer used directly for utterance, but checked for browser support.
+        const browserSupportsTTS = !!window.speechSynthesis; 
         let isSpeaking = false; 
+        let currentAudio = null; // To control the Google TTS audio element
 
-        if (SpeechRecognition && speechSynthesis) {
+        if (SpeechRecognition && browserSupportsTTS) { // Keep browserSupportsTTS check for general compatibility
             recognition = new SpeechRecognition();
             recognition.continuous = false; 
             recognition.interimResults = true; 
@@ -238,8 +240,7 @@
             recognition.onend = () => {
                 if (!isSpeaking && startListenButton.disabled) { 
                     if (!stopListenButton.disabled) { 
-                        // Intentionally left blank for now, as continuous restart might be too aggressive.
-                        // User will need to speak again for recognition to pick up if it stops due to silence.
+                        // Intentionally left blank
                     }
                 }
                  if (!startListenButton.disabled && !isSpeaking) { 
@@ -256,11 +257,11 @@
         }
         
         function startVoiceChat() {
-            if (recognition && speechSynthesis) {
+            if (recognition && browserSupportsTTS) {
                 geminiChatHistory = []; 
                 const initialSystemMessage = chatMessagesContainer.querySelector('.message-system');
                 if (initialSystemMessage && initialSystemMessage.textContent.includes('Click "Start Voice Chat" to begin.')) {
-                    initialSystemMessage.remove(); // Remove initial prompt if it exists
+                    initialSystemMessage.remove(); 
                 }
                 displayMessage("Voice chat started. Gemini is ready.", "system");
                 transcribedTextOutput.textContent = "..."; 
@@ -284,7 +285,11 @@
 
         function stopVoiceChat() {
             if (recognition) recognition.stop();
-            if (speechSynthesis.speaking) speechSynthesis.cancel(); 
+            if (currentAudio) { // Stop Google TTS audio if playing
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+                currentAudio = null;
+            }
             isSpeaking = false;
 
             startListenButton.disabled = false;
@@ -298,57 +303,111 @@
         startListenButton.addEventListener('click', startVoiceChat);
         stopListenButton.addEventListener('click', stopVoiceChat);
 
-        function speakText(textToSpeak) {
-            return new Promise((resolve, reject) => {
-                if (!speechSynthesis) {
-                    errorMessage.textContent = "Text-to-speech not available.";
-                    return reject("TTS not available");
-                }
-                if (speechSynthesis.speaking) { 
-                    speechSynthesis.cancel();
+        // --- Google Text-to-Speech Function ---
+        async function speakText(textToSpeak) {
+            return new Promise(async (resolve, reject) => {
+                if (currentAudio) { // Stop any currently playing audio
+                    currentAudio.pause();
+                    currentAudio.currentTime = 0;
                 }
 
-                const utterance = new SpeechSynthesisUtterance(textToSpeak);
-                utterance.lang = 'en-US'; 
-                
                 isSpeaking = true;
-                utterance.onstart = () => {
-                    statusMessage.textContent = "Gemini is speaking...";
-                    if (recognition) recognition.stop(); 
+                statusMessage.textContent = "Gemini is preparing to speak...";
+                if (recognition) recognition.stop(); 
+
+                const ttsApiKey = "AIzaSyConUa08TTGzm0HCK61gtRt25MR1TDPbw4"; // Environment will inject this
+                const ttsApiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ttsApiKey}`;
+                const requestBody = {
+                    input: { text: textToSpeak },
+                    // Using a standard WaveNet voice for better quality.
+                    // You can explore other voices: https://cloud.google.com/text-to-speech/docs/voices
+                    voice: { languageCode: 'en-US', name: 'en-US-Wavenet-D' }, 
+                    audioConfig: { audioEncoding: 'MP3' }
                 };
-                utterance.onend = () => {
+
+                try {
+                    const response = await fetch(ttsApiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    if (!response.ok) {
+                        const errorBody = await response.json(); // Google TTS usually returns JSON errors
+                        console.error('Google TTS API Error Response:', errorBody);
+                        let detailedError = `Google TTS API Error ${response.status}.`;
+                        if (errorBody.error && errorBody.error.message) {
+                             detailedError += ` ${errorBody.error.message}`;
+                        }
+                        if (response.status === 403) {
+                             detailedError += " Check API key, TTS API enablement, and billing.";
+                        }
+                        throw new Error(detailedError);
+                    }
+
+                    const result = await response.json();
+                    if (!result.audioContent) {
+                        throw new Error("No audio content received from Google TTS API.");
+                    }
+
+                    currentAudio = new Audio(`data:audio/mp3;base64,${result.audioContent}`);
+                    
+                    currentAudio.oncanplaythrough = () => {
+                         statusMessage.textContent = "Gemini is speaking...";
+                    }
+                    currentAudio.play();
+
+                    currentAudio.onended = () => {
+                        isSpeaking = false;
+                        currentAudio = null;
+                        statusMessage.textContent = "Finished speaking. Listening for your reply...";
+                        if (startListenButton.disabled && recognition) { 
+                            try {
+                               recognition.start(); 
+                            } catch(e) {
+                                console.error("Error restarting recognition after TTS:", e);
+                                errorMessage.textContent = "Error restarting listener. Please try stopping and starting voice chat.";
+                                stopVoiceChat();
+                            }
+                        }
+                        resolve();
+                    };
+
+                    currentAudio.onerror = (e) => {
+                        isSpeaking = false;
+                        currentAudio = null;
+                        console.error('Audio playback error:', e);
+                        errorMessage.textContent = 'Error playing Gemini\'s voice.';
+                        if (startListenButton.disabled && recognition) {
+                            statusMessage.textContent = "Error playing voice. Listening for your reply...";
+                            try {
+                                recognition.start(); 
+                            } catch(err) {
+                                 console.error("Error restarting recognition after audio playback error:", err);
+                                 stopVoiceChat();
+                            }
+                        }
+                        reject('Audio playback error');
+                    };
+
+                } catch (error) {
                     isSpeaking = false;
-                    statusMessage.textContent = "Finished speaking. Listening for your reply...";
-                    if (startListenButton.disabled && recognition) { 
+                    console.error('Google TTS API request or processing error:', error);
+                    errorMessage.textContent = `TTS Error: ${error.message.substring(0, 150)}`;
+                    if (startListenButton.disabled && recognition) {
+                        statusMessage.textContent = "Error with Gemini's voice. Listening for your reply...";
                         try {
-                           recognition.start(); 
+                            recognition.start();
                         } catch(e) {
-                            console.error("Error restarting recognition after TTS:", e);
-                            errorMessage.textContent = "Error restarting listener. Please try stopping and starting voice chat.";
+                            console.error("Error restarting recognition after TTS API error:", e);
                             stopVoiceChat();
                         }
                     }
-                    resolve();
-                };
-                utterance.onerror = (event) => {
-                    isSpeaking = false;
-                    console.error('Speech synthesis error:', event.error);
-                    errorMessage.textContent = `Error speaking: ${event.error}.`;
-                     if (startListenButton.disabled && recognition) {
-                        statusMessage.textContent = "Error speaking. Listening for your reply...";
-                         try {
-                            recognition.start(); 
-                         } catch(e) {
-                             console.error("Error restarting recognition after TTS error:", e);
-                             errorMessage.textContent = "Error restarting listener. Please try stopping and starting voice chat.";
-                             stopVoiceChat();
-                         }
-                    }
-                    reject(event.error);
-                };
-                speechSynthesis.speak(utterance);
+                    reject(error.message);
+                }
             });
         }
+
 
         function initializeChart() {
             if (sentimentChartInstance) sentimentChartInstance.destroy();
@@ -367,7 +426,7 @@
 
         async function getSentimentAnalysis(text) {
             errorMessage.textContent = '';
-            const apiKey = "AIzaSyBpNS9buNt6TJOsWgr_zK0LtPW_Jx344-E"; 
+            const apiKey = "AIzaSyConUa08TTGzm0HCK61gtRt25MR1TDPbw4"; 
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
             const prompt = `Analyze the sentiment of the following text. Provide a score from 0.0 to 1.0 for: Angry, Calm, Neutral, Happy, Annoyed. Text: "${text}". Return ONLY JSON.`;
             const schema = { type: "OBJECT", properties: { "angry": {"type": "NUMBER"}, "calm": {"type": "NUMBER"}, "neutral": {"type": "NUMBER"}, "happy": {"type": "NUMBER"}, "annoyed": {"type": "NUMBER"}}, required: ["angry", "calm", "neutral", "happy", "annoyed"]};
@@ -403,7 +462,6 @@
         function displayMessage(text, sender) {
             const initialSystemMessage = chatMessagesContainer.querySelector('.message-system');
             if (initialSystemMessage && (initialSystemMessage.textContent.includes("Click \"Start Voice Chat\" to begin.") || initialSystemMessage.textContent.includes("Voice chat started."))) {
-                // Allow "Voice chat started." to persist if it's the one being added.
                 if (!(sender === 'system' && text.includes("Voice chat started."))) {
                      initialSystemMessage.remove();
                 }
@@ -420,9 +478,7 @@
         async function getGeminiChatResponseAndSpeak(userText) {
             geminiChatHistory.push({ role: "user", parts: [{ text: userText }] });
             
-            // Text input is already removed, so no need to disable it.
-
-            const apiKey = "AIzaSyBpNS9buNt6TJOsWgr_zK0LtPW_Jx344-E";
+            const apiKey = "AIzaSyConUa08TTGzm0HCK61gtRt25MR1TDPbw4";
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
             const payload = { contents: geminiChatHistory, generationConfig: { temperature: 0.7 } };
 
@@ -457,18 +513,13 @@
                      try { recognition.start(); } catch(e) { console.error("Error restarting recognition after chat API error:", e); stopVoiceChat(); }
                 }
             } 
-            // No finally block needed to re-enable text input as it's removed.
         }
         
-        // getGeminiChatResponseForText function is removed as text input is removed.
-        // Event listeners for chatInput and sendChatMessageButton are removed.
-
-
         window.onload = () => {
             initializeChart();
             stopListenButton.disabled = true;
             stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
-            if (!SpeechRecognition || !speechSynthesis) {
+            if (!SpeechRecognition || !browserSupportsTTS) { // Check browserSupportsTTS
                  startListenButton.classList.add('opacity-50', 'cursor-not-allowed');
                  startListenButton.title = "Voice features not supported by your browser.";
                  statusMessage.textContent = 'Speech recognition or synthesis not supported by your browser. Please try a modern browser like Chrome or Edge.';
