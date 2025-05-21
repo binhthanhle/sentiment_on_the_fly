@@ -104,7 +104,7 @@
 </head>
 <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
 
-    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl">
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl"> 
         <header class="mb-6 text-center">
             <h1 class="text-3xl font-bold text-gray-800">Voice Sentiment Analyzer & Chat</h1>
             <p class="text-gray-600 mt-1">Speak for sentiment analysis and an interactive voice chat with Gemini.</p>
@@ -134,7 +134,7 @@
             <div class="w-full md:w-1/2">
                 <h2 class="text-xl font-semibold text-gray-700 mb-3 text-center">Conversation Log</h2>
                 <div id="chatMessages" class="h-64 md:h-[300px] overflow-y-auto p-3 bg-gray-50 rounded-lg border border-gray-200 custom-scrollbar">
-                    <div class="message message-system">Click "Start Voice Chat" to begin.</div>
+                    {/* Initial message will be added by JS if chat is empty */}
                 </div>
             </div>
         </div>
@@ -174,12 +174,11 @@
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         let recognition;
-        // speechSynthesis is no longer used directly for utterance, but checked for browser support.
         const browserSupportsTTS = !!window.speechSynthesis; 
         let isSpeaking = false; 
         let currentAudio = null; // To control the Google TTS audio element
 
-        if (SpeechRecognition && browserSupportsTTS) { // Keep browserSupportsTTS check for general compatibility
+        if (SpeechRecognition && browserSupportsTTS) { 
             recognition = new SpeechRecognition();
             recognition.continuous = false; 
             recognition.interimResults = true; 
@@ -238,10 +237,16 @@
             };
 
             recognition.onend = () => {
+                // The Web Speech API's behavior regarding silence detection and timeout before 'onend' 
+                // or 'onerror' (with 'no-speech') is browser-dependent and not precisely configurable 
+                // to a fixed duration like 1 second.
+                // This handler primarily manages UI state when recognition stops.
                 if (!isSpeaking && startListenButton.disabled) { 
-                    if (!stopListenButton.disabled) { 
-                        // Intentionally left blank
-                    }
+                    // If recognition stopped unexpectedly (e.g., prolonged silence) while voice chat is active,
+                    // and it's not because Gemini is speaking, the user will need to speak again or
+                    // the system will wait for the next explicit "speak" action.
+                    // Aggressive auto-restarting can be disruptive.
+                    // Current logic: recognition is restarted after Gemini finishes speaking (in speakText's onended).
                 }
                  if (!startListenButton.disabled && !isSpeaking) { 
                     statusMessage.textContent = 'Voice chat stopped. Click "Start Voice Chat" to begin.';
@@ -259,10 +264,7 @@
         function startVoiceChat() {
             if (recognition && browserSupportsTTS) {
                 geminiChatHistory = []; 
-                const initialSystemMessage = chatMessagesContainer.querySelector('.message-system');
-                if (initialSystemMessage && initialSystemMessage.textContent.includes('Click "Start Voice Chat" to begin.')) {
-                    initialSystemMessage.remove(); 
-                }
+                chatMessagesContainer.innerHTML = ''; // Clear previous chat messages from display
                 displayMessage("Voice chat started. Gemini is ready.", "system");
                 transcribedTextOutput.textContent = "..."; 
                 errorMessage.textContent = ""; 
@@ -285,7 +287,7 @@
 
         function stopVoiceChat() {
             if (recognition) recognition.stop();
-            if (currentAudio) { // Stop Google TTS audio if playing
+            if (currentAudio) { 
                 currentAudio.pause();
                 currentAudio.currentTime = 0;
                 currentAudio = null;
@@ -298,15 +300,18 @@
             stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
             statusMessage.textContent = 'Voice chat stopped.';
             transcribedTextContainer.style.display = 'none';
+            // Add the initial prompt back if the chat is empty after stopping.
+            if (chatMessagesContainer.children.length === 0) {
+                 displayMessage('Click "Start Voice Chat" to begin.', "system");
+            }
         }
 
         startListenButton.addEventListener('click', startVoiceChat);
         stopListenButton.addEventListener('click', stopVoiceChat);
 
-        // --- Google Text-to-Speech Function ---
         async function speakText(textToSpeak) {
             return new Promise(async (resolve, reject) => {
-                if (currentAudio) { // Stop any currently playing audio
+                if (currentAudio) { 
                     currentAudio.pause();
                     currentAudio.currentTime = 0;
                 }
@@ -315,13 +320,11 @@
                 statusMessage.textContent = "Gemini is preparing to speak...";
                 if (recognition) recognition.stop(); 
 
-                const ttsApiKey = "AIzaSyConUa08TTGzm0HCK61gtRt25MR1TDPbw4"; // Environment will inject this
+                const ttsApiKey = "AIzaSyConUa08TTGzm0HCK61gtRt25MR1TDPbw4"; 
                 const ttsApiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ttsApiKey}`;
                 const requestBody = {
                     input: { text: textToSpeak },
-                    // Using a standard WaveNet voice for better quality.
-                    // You can explore other voices: https://cloud.google.com/text-to-speech/docs/voices
-                    voice: { languageCode: 'en-US', name: 'en-US-Wavenet-D' }, 
+                    voice: { languageCode: 'en-US', name: 'en-US-Chirp3-HD-Zubenelgenubi' }, 
                     audioConfig: { audioEncoding: 'MP3' }
                 };
 
@@ -333,7 +336,7 @@
                     });
 
                     if (!response.ok) {
-                        const errorBody = await response.json(); // Google TTS usually returns JSON errors
+                        const errorBody = await response.json(); 
                         console.error('Google TTS API Error Response:', errorBody);
                         let detailedError = `Google TTS API Error ${response.status}.`;
                         if (errorBody.error && errorBody.error.message) {
@@ -361,6 +364,8 @@
                         isSpeaking = false;
                         currentAudio = null;
                         statusMessage.textContent = "Finished speaking. Listening for your reply...";
+                        // The transition to listening again happens quickly after TTS ends.
+                        // Precise 1-second control is not feasible with current Web APIs.
                         if (startListenButton.disabled && recognition) { 
                             try {
                                recognition.start(); 
@@ -460,13 +465,11 @@
         }
 
         function displayMessage(text, sender) {
+            // Remove initial "Click Start Voice Chat" message if it exists and we are adding any other message.
             const initialSystemMessage = chatMessagesContainer.querySelector('.message-system');
-            if (initialSystemMessage && (initialSystemMessage.textContent.includes("Click \"Start Voice Chat\" to begin.") || initialSystemMessage.textContent.includes("Voice chat started."))) {
-                if (!(sender === 'system' && text.includes("Voice chat started."))) {
-                     initialSystemMessage.remove();
-                }
+            if (initialSystemMessage && initialSystemMessage.textContent.includes("Click \"Start Voice Chat\" to begin.")) {
+                 initialSystemMessage.remove();
             }
-
 
             const messageElement = document.createElement('div');
             messageElement.classList.add('message', `message-${sender}`);
@@ -519,7 +522,12 @@
             initializeChart();
             stopListenButton.disabled = true;
             stopListenButton.classList.add('opacity-50', 'cursor-not-allowed');
-            if (!SpeechRecognition || !browserSupportsTTS) { // Check browserSupportsTTS
+            // Add initial message to chat log on load
+            if (chatMessagesContainer.children.length === 0) {
+                 displayMessage('Click "Start Voice Chat" to begin.', "system");
+            }
+
+            if (!SpeechRecognition || !browserSupportsTTS) { 
                  startListenButton.classList.add('opacity-50', 'cursor-not-allowed');
                  startListenButton.title = "Voice features not supported by your browser.";
                  statusMessage.textContent = 'Speech recognition or synthesis not supported by your browser. Please try a modern browser like Chrome or Edge.';
